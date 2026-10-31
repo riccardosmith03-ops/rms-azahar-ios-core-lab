@@ -1,0 +1,94 @@
+{
+  "upstream_repository": "https://github.com/azahar-emu/azahar.git",
+  "upstream_tag": "2127.0-alpha3",
+  "upstream_commit": "f570b53f9c9bcf42b0741afdd8cf0a6dfa5f98f5",
+  "patch": "patches/0001-rms-runtime-layout.patch",
+  "patch_sha256": "4110db7ef8705b574fc3915c3a335d830e3b500528b30600359d9772b1ec98b8",
+  "files": [
+    {
+      "path": "src/citra_libretro/citra_libretro.cpp",
+      "before_sha256": "51861854dfe1d2e249d88c681da0df035dcdb8932f4b57cad7dbdc07a7eb83bc",
+      "after_sha256": "3700e6df48929bc0db5bac9d7955c2780c20ebf4209f55599f81fdcc34300f9d",
+      "after_bytes": 30720
+    },
+    {
+      "path": "src/citra_libretro/core_settings.cpp",
+      "before_sha256": "f10b3adca2ac9960e38d4e573ca96874da82f5021ba9071d3082d76f710fca56",
+      "after_sha256": "6588b5d73f82238dec554b59c9675b3ab909f09813352179e0ee09b37ba07a75",
+      "after_bytes": 42233
+    },
+    {
+      "path": "src/citra_libretro/core_settings.h",
+      "before_sha256": "e266ea8ccba8e7f427dbcf86c8d04fd4dc40a68df61548cafaa05eafc6f1e7e5",
+      "after_sha256": "d336bdf17c3dff3ebe0e4f5963662dafb40096ee8a266b068dbc8a3a2315f3cd",
+      "after_bytes": 934
+    },
+    {
+      "path": "src/citra_libretro/emu_window/libretro_window.cpp",
+      "before_sha256": "b91c1f9a1f180bb4fa991a144b2ffdf2bb8833dd56c2b0d7e95510709a1ac29d",
+      "after_sha256": "0b1d02adf36a110fcca753db12c9f92194d61dfa37bbfc350c85202eea4ea900",
+      "after_bytes": 11524
+    },
+    {
+      "path": "src/citra_libretro/input/input_factory.cpp",
+      "before_sha256": "7f738d3c48ade77a043b4abc568fd942d5318f2642976d7f30d665c0edab1d27",
+      "after_sha256": "711c66f29dbec7b8949f735118fcda84122f67b57e5e444e05d6ece6d6d68ffc",
+      "after_bytes": 9149
+    },
+    {
+      "path": "src/citra_libretro/input/mouse_tracker.cpp",
+      "before_sha256": "a28bf545730891ec40b0aac0763f71ab0a46ea32336d3e8e9da35956660b5cf2",
+      "after_sha256": "c1e146a8b35e3449d953dfe52cfde0b109d9d81a01daff94c8bdbc5a67378fa8",
+      "after_bytes": 14741
+    },
+    {
+      "path": "src/citra_libretro/runtime_layout_hotkey.h",
+      "before_sha256": null,
+      "after_sha256": "9767550df674c655570d6285dca3e4333ed3a95996b48ead396141ecc977d15f",
+      "after_bytes": 1744
+    }
+  ],
+  "protected_build_sources": {
+    "CMakeLists.txt": "59e4c26bea4ebcc6292b9fcc589292cd5d9c9fb55ea676580ec6b0549c3fc463",
+    "src/citra_libretro/CMakeLists.txt": "d4aca8002847b285f950820c60df21ed0902086f7626b6a4107316b02f1e204a",
+    "src/core/CMakeLists.txt": "da229389d3c177f1b803f78695a2aaab4ba2bd57047591a79bac2b190918eb33",
+    "externals/CMakeLists.txt": "d18a5bcdbcc824b056926701cbaecc11a3a00041775c5bcd0c55aaf31e087715",
+    ".github/workflows/libretro.yml": "c139b5e3db12bbbb0079f7d238efc2fe53b414207fc9fc58e59c0cbd2d4c9059"
+  },
+  "required_exports": [
+    "_retro_set_environment",
+    "_retro_set_video_refresh",
+    "_retro_set_audio_sample",
+    "_retro_set_audio_sample_batch",
+    "_retro_set_input_poll",
+    "_retro_set_input_state",
+    "_retro_init",
+    "_retro_deinit",
+    "_retro_api_version",
+    "_retro_get_system_info",
+    "_retro_get_system_av_info",
+    "_retro_set_controller_port_device",
+    "_retro_reset",
+    "_retro_run",
+    "_retro_serialize_size",
+    "_retro_serialize",
+    "_retro_unserialize",
+    "_retro_cheat_reset",
+    "_retro_cheat_set",
+    "_retro_load_game",
+    "_retro_load_game_special",
+    "_retro_unload_game",
+    "_retro_get_region",
+    "_retro_get_memory_data",
+    "_retro_get_memory_size"
+  ],
+  "target": {
+    "platform": "iPhoneOS",
+    "architecture": "arm64",
+    "minimum_ios": "17.4",
+    "framework": "azahar.libretro.framework",
+    "executable": "azahar.libretro",
+    "install_name": "@rpath/azahar.libretro.framework/azahar.libretro"
+  },
+  "scope": "RT/R3 runtime layout only; no JIT enablement and no 40 FPS implementation"
+}

@@ -1,0 +1,303 @@
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -62,6 +62,7 @@
+     std::unique_ptr<EmuWindow_LibRetro> emu_window;
+     bool game_loaded = false;
+     bool first_run_loop = true;
++    LibRetro::RuntimeLayoutState runtime_layout;
+     struct retro_hw_render_callback hw_render{};
+ };
+ 
+@@ -211,6 +212,34 @@
+     Core::System::GetInstance().ApplySettings();
+ }
+ 
++// Optional runtime-only override: no options files, saves or emulated clocks are written.
++static bool UpdateRuntimeLayoutHotkey() {
++    const auto mode = LibRetro::settings.runtime_layout_hotkey;
++    if (mode != LibRetro::RuntimeLayoutHotkey::Disabled)
++        LibRetro::PollInput();
++    const bool l3 = mode != LibRetro::RuntimeLayoutHotkey::Disabled &&
++        LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3) > 0;
++    const bool r2 = mode != LibRetro::RuntimeLayoutHotkey::Disabled &&
++        LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2) > 0;
++    const bool r3 = mode != LibRetro::RuntimeLayoutHotkey::Disabled &&
++        LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3) > 0;
++    if (!emu_instance->runtime_layout.Update(mode, l3, r2, r3,
++            Settings::values.layout_option.GetValue() == Settings::LayoutOption::SingleScreen))
++        return false;
++
++    const auto layout = emu_instance->runtime_layout.TopOnly() ?
++        Settings::LayoutOption::SingleScreen : Settings::LayoutOption::SideScreen;
++    // Always show TOP in the single-screen view; do not inherit the old swap latch.
++    if (Settings::values.layout_option.GetValue() != layout ||
++        Settings::values.swap_screen.GetValue()) {
++        Settings::values.layout_option = layout;
++        Settings::values.swap_screen = false;
++        Core::System::GetInstance().ApplySettings();
++        emu_instance->emu_window->UpdateLayout();
++    }
++    return true;
++}
++
+ /**
+  * libretro callback; Called every game tick.
+  */
+@@ -239,34 +268,41 @@
+     // Check if the screen swap button is pressed
+     static bool screen_swap_button_state = false;
+     static bool screens_swapped = false;
+-    bool screen_swap_btn =
+-        !!LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3);
+-    if (screen_swap_btn != screen_swap_button_state) {
+-        if (LibRetro::settings.swap_screen_mode == "Toggle") {
+-            if (!screen_swap_button_state)
+-                screens_swapped = !screens_swapped;
+-
+-            if (screens_swapped)
+-                Settings::values.swap_screen =
+-                    LibRetro::FetchVariable("citra_swap_screen", "Top") != "Bottom";
+-            else
+-                Settings::values.swap_screen =
+-                    LibRetro::FetchVariable("citra_swap_screen", "Top") == "Bottom";
+-        } else {
+-            if (screen_swap_btn)
+-                Settings::values.swap_screen =
+-                    LibRetro::FetchVariable("citra_swap_screen", "Top") != "Bottom";
+-            else
+-                Settings::values.swap_screen =
+-                    LibRetro::FetchVariable("citra_swap_screen", "Top") == "Bottom";
+-        }
+-
+-        Core::System::GetInstance().ApplySettings();
+-
+-        // Update the framebuffer sizing.
+-        emu_instance->emu_window->UpdateLayout();
+-
+-        screen_swap_button_state = screen_swap_btn;
++    if (UpdateRuntimeLayoutHotkey()) {
++        // Keep the original latch in sync while its shortcut is reserved for layout.
++        screen_swap_button_state =
++            LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3) > 0;
++        screens_swapped = false;
++    } else {
++        bool screen_swap_btn =
++            !!LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3);
++        if (screen_swap_btn != screen_swap_button_state) {
++            if (LibRetro::settings.swap_screen_mode == "Toggle") {
++                if (!screen_swap_button_state)
++                    screens_swapped = !screens_swapped;
++
++                if (screens_swapped)
++                    Settings::values.swap_screen =
++                        LibRetro::FetchVariable("citra_swap_screen", "Top") != "Bottom";
++                else
++                    Settings::values.swap_screen =
++                        LibRetro::FetchVariable("citra_swap_screen", "Top") == "Bottom";
++            } else {
++                if (screen_swap_btn)
++                    Settings::values.swap_screen =
++                        LibRetro::FetchVariable("citra_swap_screen", "Top") != "Bottom";
++                else
++                    Settings::values.swap_screen =
++                        LibRetro::FetchVariable("citra_swap_screen", "Top") == "Bottom";
++            }
++
++            Core::System::GetInstance().ApplySettings();
++
++            // Update the framebuffer sizing.
++            emu_instance->emu_window->UpdateLayout();
++
++            screen_swap_button_state = screen_swap_btn;
++        }
+     }
+ 
+ #ifdef ENABLE_OPENGL
+@@ -501,6 +537,7 @@
+  * libretro callback; Called when a game is to be loaded.
+  */
+ bool retro_load_game(const struct retro_game_info* info) {
++    emu_instance->runtime_layout.Reset();
+     LOG_INFO(Frontend, "Starting Azahar RetroArch game...");
+ 
+ #if CITRA_ARCH(x86_64) && CITRA_HAS_SSE42
+@@ -633,6 +670,7 @@
+ }
+ 
+ void retro_unload_game() {
++    emu_instance->runtime_layout.Reset();
+     LOG_DEBUG(Frontend, "Unloading game...");
+     Core::System::GetInstance().Shutdown();
+ }
+--- a/src/citra_libretro/core_settings.cpp
++++ b/src/citra_libretro/core_settings.cpp
+@@ -472,6 +472,27 @@
+     },
+ 
+     // Layout Category
++    {
++        "citra_rms_layout_hotkey",
++        "Runtime Both/Top Hotkey (RMS experimental)",
++        "Both/Top Hotkey",
++        "Switch between both screens side by side and the top screen during gameplay. "
++        "Disabled preserves the original controls. L3 replaces Home/swap. "
++        "R3 replaces controller stylus touch. L3 + R2 keeps R2 alone as ZR; "
++        "hold L3 then press R2. "
++        "R2 alone disables the game's ZR button. No save or restart is performed.",
++        nullptr,
++        config::category::input,
++        {
++            { "disabled", "Disabled (original controls)" },
++            { "l3", "L3 (replaces Home/swap)" },
++            { "r3", "R3 (replaces controller stylus touch)" },
++            { "l3_r2", "L3 + R2 (RT alone remains ZR)" },
++            { "r2", "R2 alone (disables ZR)" },
++            { nullptr, nullptr }
++        },
++        "disabled"
++    },
+     {
+         config::layout::layout_option,
+         "Screen Layout",
+@@ -1118,6 +1139,12 @@
+ }
+ 
+ static void ParseInputOptions(void) {
++    const auto hotkey = LibRetro::FetchVariable("citra_rms_layout_hotkey", "disabled");
++    LibRetro::settings.runtime_layout_hotkey =
++        hotkey == "l3" ? RuntimeLayoutHotkey::L3 :
++        hotkey == "r2" ? RuntimeLayoutHotkey::R2 :
++        hotkey == "r3" ? RuntimeLayoutHotkey::R3 :
++        hotkey == "l3_r2" ? RuntimeLayoutHotkey::L3R2 : RuntimeLayoutHotkey::Disabled;
+     LibRetro::settings.analog_function = GetAnalogFunction(
+         LibRetro::FetchVariable(config::input::analog_function, "c_stick_and_touchscreen"));
+ 
+--- a/src/citra_libretro/core_settings.h
++++ b/src/citra_libretro/core_settings.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include <string>
++#include "citra_libretro/runtime_layout_hotkey.h"
+ #include "core/hle/service/cfg/cfg.h"
+ 
+ namespace LibRetro {
+@@ -29,6 +30,8 @@
+ 
+     std::string swap_screen_mode;
+ 
++    RuntimeLayoutHotkey runtime_layout_hotkey = RuntimeLayoutHotkey::Disabled;
++
+     bool enable_motion;
+ 
+     float motion_sensitivity;
+--- a/src/citra_libretro/emu_window/libretro_window.cpp
++++ b/src/citra_libretro/emu_window/libretro_window.cpp
+@@ -296,6 +296,11 @@
+     auto geom = ComputeLayoutGeometry();
+     unsigned baseX = geom.width;
+     unsigned baseY = geom.height;
++    // Do not leave an emulated stylus held down when its screen becomes hidden.
++    if (!geom.emulated_pointer && hasTouched) {
++        hasTouched = false;
++        TouchReleased();
++    }
+     enableEmulatedPointer = geom.emulated_pointer;
+ 
+     // Update Libretro with our status
+--- a/src/citra_libretro/input/input_factory.cpp
++++ b/src/citra_libretro/input/input_factory.cpp
+@@ -12,6 +12,7 @@
+ #include "core/frontend/input.h"
+ 
+ #include "citra_libretro/environment.h"
++#include "citra_libretro/core_settings.h"
+ #include "citra_libretro/input/input_factory.h"
+ 
+ namespace LibRetro {
+@@ -27,6 +28,16 @@
+     explicit LibRetroButton(int joystick_, int button_) : joystick(joystick_), button(button_) {}
+ 
+     bool GetStatus() const override {
++        if (joystick == 0) {
++            const auto mode = LibRetro::settings.runtime_layout_hotkey;
++            if (button == RETRO_DEVICE_ID_JOYPAD_L3 && RuntimeLayoutConsumesL3(mode))
++                return false;
++            if (button == RETRO_DEVICE_ID_JOYPAD_R2 &&
++                mode != RuntimeLayoutHotkey::Disabled &&
++                RuntimeLayoutConsumesR2(mode, mode == RuntimeLayoutHotkey::L3R2 &&
++                    CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3) > 0))
++                return false;
++        }
+         return CheckInput((unsigned int)joystick, RETRO_DEVICE_JOYPAD, 0, (unsigned int)button) > 0;
+     }
+ 
+--- a/src/citra_libretro/input/mouse_tracker.cpp
++++ b/src/citra_libretro/input/mouse_tracker.cpp
+@@ -137,7 +137,10 @@
+ 
+     if (LibRetro::settings.analog_function != LibRetro::CStickFunction::CStick) {
+         // Check right analog input
+-        state |= LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3);
++        // R3 can be reserved for the optional runtime layout shortcut.
++        // Direct touchscreen and mouse input remain independent.
++        if (LibRetro::settings.runtime_layout_hotkey != LibRetro::RuntimeLayoutHotkey::R3)
++            state |= LibRetro::CheckInput(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3);
+ 
+         // TODO: Provide config option for ratios here
+         auto widthSpeed = (layout.bottom_screen.GetWidth() / 20.0);
+--- /dev/null
++++ b/src/citra_libretro/runtime_layout_hotkey.h
+@@ -0,0 +1,52 @@
++// RMS experimental runtime layout policy. GPLv2 or later, as the surrounding core.
++#pragma once
++
++namespace LibRetro {
++enum class RuntimeLayoutHotkey { Disabled, L3, R2, R3, L3R2 };
++
++inline bool RuntimeLayoutConsumesL3(RuntimeLayoutHotkey mode) {
++    return mode == RuntimeLayoutHotkey::L3 || mode == RuntimeLayoutHotkey::L3R2;
++}
++inline bool RuntimeLayoutConsumesR2(RuntimeLayoutHotkey mode, bool l3) {
++    return mode == RuntimeLayoutHotkey::R2 ||
++           (mode == RuntimeLayoutHotkey::L3R2 && l3);
++}
++
++class RuntimeLayoutState {
++public:
++    void Reset() {
++        initialized = false;
++        armed = false;
++        held = false;
++    }
++    // Initial held buttons must be released before they can toggle a view.
++    bool Update(RuntimeLayoutHotkey mode, bool l3, bool r2, bool r3, bool configured_top_only) {
++        if (mode == RuntimeLayoutHotkey::Disabled) {
++            Reset();
++            return false;
++        }
++        if (!initialized || mode != previous_mode) {
++            Reset();
++            initialized = true;
++            previous_mode = mode;
++            top_only = configured_top_only;
++        }
++        const bool down = mode == RuntimeLayoutHotkey::L3 ? l3 :
++                          mode == RuntimeLayoutHotkey::R2 ? r2 :
++                          mode == RuntimeLayoutHotkey::R3 ? r3 : (l3 && r2);
++        if (!down)
++            armed = true;
++        if (down && !held && armed)
++            top_only = !top_only;
++        held = down;
++        return true;
++    }
++    bool TopOnly() const { return top_only; }
++private:
++    RuntimeLayoutHotkey previous_mode = RuntimeLayoutHotkey::Disabled;
++    bool initialized = false;
++    bool armed = false;
++    bool held = false;
++    bool top_only = false;
++};
++} // namespace LibRetro
