@@ -3,7 +3,7 @@
   "upstream_tag": "2127.0-alpha3",
   "upstream_commit": "f570b53f9c9bcf42b0741afdd8cf0a6dfa5f98f5",
   "patch": "patches/0001-rms-runtime-layout.patch",
-  "patch_sha256": "4110db7ef8705b574fc3915c3a335d830e3b500528b30600359d9772b1ec98b8",
+  "patch_sha256": "936d261436daf2c3dad8907b6f3839f8e0502bdfb037fb3c7a13255279965d41",
   "files": [
     {
       "path": "src/citra_libretro/citra_libretro.cpp",
@@ -14,8 +14,8 @@
     {
       "path": "src/citra_libretro/core_settings.cpp",
       "before_sha256": "f10b3adca2ac9960e38d4e573ca96874da82f5021ba9071d3082d76f710fca56",
-      "after_sha256": "6588b5d73f82238dec554b59c9675b3ab909f09813352179e0ee09b37ba07a75",
-      "after_bytes": 42233
+      "after_sha256": "2aeb67f2d1ad37a07d2cda74335783419bdd41d2cbd4ebdaaf5f53dc8fabdfb2",
+      "after_bytes": 43476
     },
     {
       "path": "src/citra_libretro/core_settings.h",
@@ -46,6 +46,18 @@
       "before_sha256": null,
       "after_sha256": "9767550df674c655570d6285dca3e4333ed3a95996b48ead396141ecc977d15f",
       "after_bytes": 1744
+    },
+    {
+      "path": "src/core/arm/ios_jit_policy.h",
+      "before_sha256": null,
+      "after_sha256": "1564591866dc67ffececd77278a06c7978c2e5c7def545c146716374fe97e568",
+      "after_bytes": 1337
+    },
+    {
+      "path": "src/core/core.cpp",
+      "before_sha256": "13f9b6fc1ae6f1bf8b769e8a1e41ec633766bc3c088d74f60f6d7d29d69e1e2e",
+      "after_sha256": "29c9b02ea5ef8b03b18ebbe74524a57b7954fae69db1c582c7873f40c50d8b0b",
+      "after_bytes": 41132
     }
   ],
   "protected_build_sources": {
@@ -90,5 +102,24 @@
     "executable": "azahar.libretro",
     "install_name": "@rpath/azahar.libretro.framework/azahar.libretro"
   },
-  "scope": "RT/R3 runtime layout only; no JIT enablement and no 40 FPS implementation"
+  "scope": "Preserved RT/R3 layout plus default-off experimental CPU-only iOS JIT; no clock/audio/frame pacing changes or measured performance claim",
+  "dependency_files": [
+    {
+      "path": "externals/oaknut/include/oaknut/code_block.hpp",
+      "submodule": "externals/oaknut",
+      "relative_path": "include/oaknut/code_block.hpp",
+      "submodule_commit": "6b1d57ea7ed4882d32a91eeaa6557b0ecb4da152",
+      "before_sha256": "c1b59e9d8a37775f8558fb3a0f7b34a6b7dbd2b2c13c088be65253c2223faa8a",
+      "after_sha256": "06c94d906cb5da28d5124bb424255597f96c337a71e3a11596d1b84189177460"
+    }
+  ],
+  "jit_policy": {
+    "option": "citra_ios_cpu_jit",
+    "default": "disabled",
+    "opt_in": "jit_if_available",
+    "preflight_failure": "FastInterp before monitor/CPU construction",
+    "oaknut_failure_after_selection": "fixed phase/errno diagnostic then process _Exit(86); no live fallback or unwind",
+    "shader_jit": "remains disabled on IOS",
+    "same_process_permission_probe_run": false
+  }
 }

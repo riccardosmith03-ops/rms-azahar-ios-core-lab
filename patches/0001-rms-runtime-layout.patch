@@ -1,3 +1,77 @@
+--- a/externals/oaknut/include/oaknut/code_block.hpp
++++ b/externals/oaknut/include/oaknut/code_block.hpp
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <algorithm>
++#include <cerrno>
+ #include <cstddef>
+ #include <cstdint>
+ #include <new>
+@@ -19,6 +20,11 @@
+ #    include <unistd.h>
+ #else
+ #    include <sys/mman.h>
++#endif
++
++#if defined(IOS)
++// Defined by the owning Azahar core; no exception may cross generated code.
++extern "C" [[noreturn]] __attribute__((visibility("hidden"))) void rms_azahar_ios_jit_fail_closed(int phase, int native_error) noexcept;
+ #endif
+ 
+ namespace oaknut {
+@@ -44,8 +50,20 @@
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+ #endif
+ 
+-        if (m_memory == nullptr)
++#if defined(IOS)
++        if (m_memory == MAP_FAILED) {
++            const int error = errno;
++            m_memory = nullptr;
++            rms_azahar_ios_jit_fail_closed(1, error);
++        }
++#endif
++        if (m_memory == nullptr) {
++#if defined(IOS)
++            rms_azahar_ios_jit_fail_closed(1, ENOMEM);
++#else
+             throw std::bad_alloc{};
++#endif
++        }
+     }
+ 
+     ~CodeBlock()
+@@ -75,7 +93,14 @@
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(1);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
++#if defined(IOS)
++        if (mprotect(m_memory, m_size, PROT_READ | PROT_EXEC) != 0) {
++            const int error = errno;
++            rms_azahar_ios_jit_fail_closed(3, error);
++        }
++#else
+         mprotect(m_memory, m_size, PROT_READ | PROT_EXEC);
++#endif
+ #endif
+     }
+ 
+@@ -84,7 +109,14 @@
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(0);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
++#if defined(IOS)
++        if (mprotect(m_memory, m_size, PROT_READ | PROT_WRITE) != 0) {
++            const int error = errno;
++            rms_azahar_ios_jit_fail_closed(2, error);
++        }
++#else
+         mprotect(m_memory, m_size, PROT_READ | PROT_WRITE);
++#endif
+ #endif
+     }
+ 
 --- a/src/citra_libretro/citra_libretro.cpp
 +++ b/src/citra_libretro/citra_libretro.cpp
 @@ -62,6 +62,7 @@
@@ -131,7 +205,54 @@
  }
 --- a/src/citra_libretro/core_settings.cpp
 +++ b/src/citra_libretro/core_settings.cpp
-@@ -472,6 +472,27 @@
+@@ -10,6 +10,9 @@
+ #include "common/file_util.h"
+ #include "common/settings.h"
+ #include "core/hle/service/cfg/cfg.h"
++#ifdef IOS
++#include "core/core.h"
++#endif
+ 
+ namespace BaseKeys = Settings::HKeys;
+ 
+@@ -38,6 +41,10 @@
+ } // namespace category
+ 
+ namespace cpu {
++#ifdef IOS
++static constexpr const char* ios_cpu_jit = "citra_ios_cpu_jit";
++static constexpr const char* jit_if_available = "jit_if_available";
++#endif
+ static constexpr const char* use_cpu_jit = citra_setting(BaseKeys::use_cpu_jit);
+ static constexpr const char* use_fastinterp = citra_setting(BaseKeys::use_fastinterp);
+ static constexpr const char* cpu_clock_percentage = citra_setting(BaseKeys::cpu_clock_percentage);
+@@ -144,7 +151,24 @@
+ 
+ static constexpr retro_core_option_v2_definition option_definitions[] = {
+     // CPU Category
+-#ifndef IOS
++#ifdef IOS
++    {
++        config::cpu::ios_cpu_jit,
++        "Experimental iOS CPU JIT",
++        "iOS CPU JIT",
++        "Disabled by default. JIT if available requires an in-process worker capability test. "
++        "Reported probe refusal uses FastInterp. A native probe fault or later JIT memory failure can terminate RetroArch. "
++        "Close and reopen content to change this option. No performance guarantee.",
++        nullptr,
++        config::category::cpu,
++        {
++            { config::disabled, "Disabled" },
++            { config::cpu::jit_if_available, "JIT if available (experimental)" },
++            { nullptr, nullptr }
++        },
++        config::disabled
++    },
++#else
+     {
+         config::cpu::use_cpu_jit,
+         "Enable CPU JIT",
+@@ -472,6 +496,27 @@
      },
  
      // Layout Category
@@ -159,7 +280,27 @@
      {
          config::layout::layout_option,
          "Screen Layout",
-@@ -1118,6 +1139,12 @@
+@@ -843,10 +888,16 @@
+ }
+ 
+ static void ParseCpuOptions(void) {
++#ifdef IOS
++    // The selected backend belongs to the live CPU/monitor set. Ignore mode changes
++    // while powered on; the next content load resolves the new request before Init.
++    if (!Core::System::GetInstance().IsPoweredOn()) {
++        Settings::values.use_cpu_jit =
++            LibRetro::FetchVariable(config::cpu::ios_cpu_jit, config::disabled) ==
++            config::cpu::jit_if_available;
++    }
++#else
+     Settings::values.use_cpu_jit =
+-#ifdef IOS
+-        false;
+-#else
+         LibRetro::FetchVariable(config::cpu::use_cpu_jit, config::enabled) == config::enabled;
+ #endif
+ 
+@@ -1118,6 +1169,12 @@
  }
  
  static void ParseInputOptions(void) {
@@ -301,3 +442,152 @@
 +    bool top_only = false;
 +};
 +} // namespace LibRetro
+--- /dev/null
++++ b/src/core/arm/ios_jit_policy.h
+@@ -0,0 +1,32 @@
++// Copyright 2026 RMS contributors
++// Licensed under GPLv3 or any later version; see LICENSE.txt.
++#pragma once
++#include <cstdint>
++#include <initializer_list>
++namespace Core::IOSJit {
++enum class ProbePhase : int { Ready=0, Allocate=1, Writable=2, Executable=3, Value=4, Release=5, Worker=6, Unsupported=7 };
++struct ProbeResult {
++    ProbePhase phase;
++    int native_error;
++    bool Passed() const noexcept { return phase == ProbePhase::Ready; }
++};
++// Ops is also used by the host policy tests. Failed transitions never emit or execute.
++template <typename Ops>
++ProbeResult ProbeMemory(Ops& ops) {
++    if (!ops.Allocate()) return {ProbePhase::Allocate, ops.LastError()};
++    const auto fail = [&ops](ProbePhase phase) {
++        const int error = ops.LastError();
++        ops.Release();
++        return ProbeResult{phase, error};
++    };
++    for (const auto value : {std::uint64_t{42}, std::uint64_t{43}}) {
++        if (!ops.MakeWritable()) return fail(ProbePhase::Writable);
++        ops.Emit(value == 42 ? 0xD2800540U : 0xD2800560U);
++        ops.Invalidate();
++        if (!ops.MakeExecutable()) return fail(ProbePhase::Executable);
++        if (ops.Execute() != value) return fail(ProbePhase::Value);
++    }
++    if (!ops.Release()) return {ProbePhase::Release, ops.LastError()};
++    return {ProbePhase::Ready, 0};
++}
++} // namespace Core::IOSJit
+--- a/src/core/core.cpp
++++ b/src/core/core.cpp
+@@ -4,6 +4,18 @@
+ 
+ #include <stdexcept>
+ #include <utility>
++#if defined(IOS)
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <thread>
++#include <system_error>
++#include <TargetConditionals.h>
++#include <libkern/OSCacheControl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include "core/arm/ios_jit_policy.h"
++#endif
+ #include <boost/serialization/array.hpp>
+ #include "audio_core/dsp_interface.h"
+ #include "audio_core/hle/hle.h"
+@@ -63,6 +75,69 @@
+ #include "video_core/gpu.h"
+ #include "video_core/renderer_base.h"
+ 
++#if defined(IOS)
++// Never throw or return through generated-code frames. This intentionally terminates
++// RetroArch on an allocator/protection failure after JIT was selected, even at startup.
++extern "C" [[noreturn]] __attribute__((visibility("hidden"))) void rms_azahar_ios_jit_fail_closed(int phase, int native_error) noexcept {
++    char message[96];
++    const int length = std::snprintf(message, sizeof(message),
++                                    "RMS_CPU_JIT_FATAL phase=%d errno=%d; stopping process\n",
++                                    phase, native_error);
++    if (length > 0 && static_cast<std::size_t>(length) < sizeof(message)) {
++        (void)write(STDERR_FILENO, message, static_cast<std::size_t>(length));
++    }
++    std::_Exit(86);
++}
++namespace {
++Core::IOSJit::ProbeResult ProbeIOSCodeMemoryOnWorker() {
++#if defined(__APPLE__) && TARGET_OS_IPHONE && (defined(__aarch64__) || defined(__arm64__))
++    struct Ops {
++        static constexpr std::size_t Size() noexcept { return 16 * 1024 * 1024; }
++        void* memory = nullptr;
++        int error = 0;
++        int LastError() const noexcept { return error; }
++        bool Allocate() {
++            memory = mmap(nullptr, Size(), PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++            if (memory == MAP_FAILED) { error = errno; memory = nullptr; return false; }
++            if (memory == nullptr) { error = ENOMEM; (void)munmap(memory, Size()); return false; }
++            return true;
++        }
++        bool MakeWritable() {
++            if (mprotect(memory, Size(), PROT_READ | PROT_WRITE) != 0) { error = errno; return false; }
++            return true;
++        }
++        void Emit(std::uint32_t instruction) {
++            auto* code = static_cast<volatile std::uint32_t*>(memory);
++            code[0] = instruction;
++            code[1] = 0xD65F03C0U; // ret
++        }
++        void Invalidate() { sys_icache_invalidate(memory, 2 * sizeof(std::uint32_t)); }
++        bool MakeExecutable() {
++            if (mprotect(memory, Size(), PROT_READ | PROT_EXEC) != 0) { error = errno; return false; }
++            return true;
++        }
++        std::uint64_t Execute() { return reinterpret_cast<std::uint64_t (*)()>(memory)(); }
++        bool Release() {
++            if (munmap(memory, Size()) != 0) { error = errno; return false; }
++            memory = nullptr;
++            return true;
++        }
++    };
++    Core::IOSJit::ProbeResult result{Core::IOSJit::ProbePhase::Worker, 0};
++    try {
++        std::thread worker([&result] { Ops ops; result = Core::IOSJit::ProbeMemory(ops); });
++        worker.join();
++    } catch (const std::system_error& error) {
++        return {Core::IOSJit::ProbePhase::Worker, error.code().value()};
++    }
++    return result;
++#else
++    return {Core::IOSJit::ProbePhase::Unsupported, 0};
++#endif
++}
++} // namespace
++#endif
++
+ namespace Core {
+ 
+ /*static*/ System System::s_instance;
+@@ -604,6 +679,22 @@
+ 
+     LOG_DEBUG(HW_Memory, "initialized OK");
+ 
++#if defined(IOS)
++    // Resolve the requested backend before creating the monitor or ANY CPU core.
++    // A failed capability probe leaves no partial JIT backend to roll back.
++    if (Settings::values.use_cpu_jit) {
++        const auto probe = ProbeIOSCodeMemoryOnWorker();
++        if (!probe.Passed()) {
++            Settings::values.use_cpu_jit = false;
++            Settings::values.use_fastinterp = true;
++            LOG_WARNING(Core, "iOS CPU JIT preflight refused: phase={}, errno={}; using FastInterp",
++                        static_cast<int>(probe.phase), probe.native_error);
++        } else {
++            LOG_INFO(Core, "iOS CPU JIT worker preflight passed; experimental Dynarmic selected");
++        }
++    }
++#endif
++
+     memory = std::make_unique<Memory::MemorySystem>(*this);
+ 
+     timing = std::make_unique<Timing>(num_cores, Settings::values.cpu_clock_percentage.GetValue(),

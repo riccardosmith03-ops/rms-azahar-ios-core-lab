@@ -5,14 +5,16 @@ source_dir="$(cd "$1" && pwd)"
 build_dir="$2"
 test ! -e "$build_dir"
 python3 "$carrier/scripts/verify-source.py" --upstream "$source_dir" --phase before
-git -c core.autocrlf=false -C "$source_dir" apply --check "$carrier/patches/0001-rms-runtime-layout.patch"
-git -c core.autocrlf=false -C "$source_dir" apply "$carrier/patches/0001-rms-runtime-layout.patch"
+git -c core.autocrlf=false -C "$source_dir" apply --check --exclude="externals/oaknut/**" "$carrier/patches/0001-rms-runtime-layout.patch"
+git -c core.autocrlf=false -C "$source_dir/externals/oaknut" apply --check -p3 --include="include/oaknut/code_block.hpp" "$carrier/patches/0001-rms-runtime-layout.patch"
+git -c core.autocrlf=false -C "$source_dir" apply --exclude="externals/oaknut/**" "$carrier/patches/0001-rms-runtime-layout.patch"
+git -c core.autocrlf=false -C "$source_dir/externals/oaknut" apply -p3 --include="include/oaknut/code_block.hpp" "$carrier/patches/0001-rms-runtime-layout.patch"
 python3 "$carrier/scripts/verify-source.py" --upstream "$source_dir" --phase after
 # Host-only state-policy test: no iOS binary is executed on the runner.
 xcrun --sdk macosx clang++ -std=c++17 -I"$source_dir/src" \
   "$carrier/tests/runtime_layout_policy_test.cpp" -o "$RUNNER_TEMP/rms-layout-policy-test"
 "$RUNNER_TEMP/rms-layout-policy-test"
-# Based on the fixed upstream libretro-ios recipe; iOS JIT remains disabled.
+# Based on the fixed upstream libretro-ios recipe; experimental iOS CPU JIT remains disabled by default.
 cmake -S "$source_dir" -B "$build_dir" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DENABLE_LIBRETRO=ON -DIOS=ON \

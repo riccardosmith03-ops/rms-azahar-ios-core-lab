@@ -23,8 +23,8 @@ src/citra_libretro/CMakeLists.txt and the root/externals CMake sources. It prese
 compiler definitions, Vulkan and FastInterp defaults. It disables PCH, LTO and tests to bound
 build resources. BUILD_TESTING=OFF is the real Oaknut guard. The stale upstream ENABLE_OPT
 flag is omitted because the current Crypto++ CMake defines different flags; no guessed
-optimization or JIT flag is added. CPU/shader JIT remain hard-disabled by the upstream IOS
-parser. No dependency host dylib is allowed in the packaged core.
+optimization or JIT flag is added. CPU JIT now has an experimental default-off iOS option; shader JIT remains disabled.
+The guest CPU clock, audio and libretro timing are unchanged. No dependency host dylib is allowed in the packaged core.
 
 Runtime option citra_rms_layout_hotkey defaults to disabled, preserving original controls.
 Available modes: r3, r2, l3 and l3_r2. The user wants the SAME physical button that changes
@@ -48,10 +48,10 @@ The artifact includes this portable source recipe, patch, lock and GPL license. 
 corresponding upstream/dependency sources use the fixed public commit and its submodules;
 no release publication is performed by this workflow.
 
-40 FPS REQUEST REMAINS OPEN. This patch does not change video timing, emulation speed, guest
-CPU clock, audio, render rate or retro_run pacing. 1x resolution is not a 40 FPS cap. A safe
+30 FPS AT FULL SPEED REMAINS UNMEASURED. This patch does not change video timing, emulation speed, guest
+CPU clock, audio, render rate or retro_run pacing. 1x resolution is not a 30 FPS cap. A safe
 render-only cap needs separate Vulkan image/fence and duplicate-frame work plus real gameplay
-measurement. Neither stable 40 FPS nor improved CPU/GPU cost is promised by this build.
+measurement. Neither stable 30 FPS nor improved CPU/GPU cost is promised by this build.
 
 Required later checks: actual compiler result; static package inspection; retain current
 framework/configs; sign/trust under the existing jailbreak flow; test physical mapping,
@@ -59,3 +59,29 @@ Both/Top transitions and held-button behavior; touch after returning from TOP; r
 controller disconnect/reconnect; ordinary in-game save/close/reopen; normal audio/game clock.
 Keep quickstates disabled and preserve all complete per-game options, especially Ultrasole1x
 and Rubino2x. No forced restart during a game with unsaved progress.
+
+EXPERIMENTAL CPU JIT CANDIDATE — LOCAL, NOT BUILT OR DEVICE TESTED
+Option citra_ios_cpu_jit defaults to disabled. jit_if_available runs a bounded
+RX -> RW -> emit -> icache -> RX worker test inside the actual RetroArch process,
+verifying return42 and then return43 after rewriting the same allocation. A failed
+probe chooses FastInterp before the exclusive monitor or any CPU core is created.
+Changing the option while content is running is deferred until close/reopen.
+
+This is an opt-in experiment, not a 30 FPS cap or a measured speed improvement.
+The code does not enable kernel/debug permissions or use MAP_JIT. CS_DEBUGGED or
+a JIT flag alone is not treated as capability proof. A kernel signing failure
+while invoking the probe may still terminate the app; it cannot be caught as an
+ordinary syscall failure. No signal handler is installed to hide that outcome.
+
+Oaknut iOS mmap/MAP_FAILED and RW/RX protection results are checked on every use.
+After JIT selection, a code-memory allocation/protection failure prints only a
+fixed phase and errno, then terminates RetroArch with _Exit(86). This includes
+initial Dynarmic construction after a successful probe. It is NOT a graceful
+content stop: the app exits, unsaved gameplay may be lost, no C++ exception is
+unwound through generated frames, and no live interpreter fallback is attempted.
+Keep ordinary in-game saves and leave this option disabled during normal use.
+
+Host mock policy tests cover failed allocation, first/second RW and RX failure,
+wrong emitted return value, cleanup and the successful two-call ordering. They
+use no executable memory. The unchanged RT/R3 policy tests remain included.
+A future authorized Mac build and explicit on-device testing are still required.
