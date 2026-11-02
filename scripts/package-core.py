@@ -71,7 +71,7 @@ def main():
     records=[]
     for path in sorted(out.rglob('*')):
         if path.is_file():records.append({'path':path.relative_to(out).as_posix(),'bytes':path.stat().st_size,'sha256':sha(path)})
-    inspection={'status':'STATIC_INSPECTION_PASS_RUNTIME_UNTESTED','source_commit':lock['upstream_commit'],'patch_sha256':lock['patch_sha256'],'minimum_ios':'17.4','unsigned':True,'abi_exports_verified':len(lock['required_exports']),'binary':info,'files':records,'cpu_jit_default_enabled':False,'cpu_jit_experimental_opt_in_added':True,'cpu_jit_permission_or_performance_tested':False,'cpu_jit_fatal_policy':'iOS code-memory failures after selection terminate process with status86','fps40_implemented':False,'fps30_implemented':False,'guest_clock_audio_timing_changed':False}
+    inspection={'status':'STATIC_INSPECTION_PASS_RUNTIME_UNTESTED','source_commit':lock['upstream_commit'],'patch_sha256':lock['patch_sha256'],'minimum_ios':'17.4','unsigned':True,'abi_exports_verified':len(lock['required_exports']),'binary':info,'files':records,'cpu_jit_default_enabled':False,'cpu_jit_experimental_opt_in_added':True,'cpu_jit_permission_or_performance_tested':False,'cpu_jit_fatal_policy':'iOS code-memory failures after selection terminate process with status86','fps40_implemented':False,'fps30_output_mode_implemented':True,'fps30_full_speed_or_audio_tested':False,'frontend_optional30_timing':True,'guest_clock_audio_timing_changed':False}
     (out/'inspection.json').write_text(json.dumps(inspection,indent=2)+'\n',encoding='utf-8')
     archive=out/'rms-azahar-runtime-layout-UNSIGNED.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:

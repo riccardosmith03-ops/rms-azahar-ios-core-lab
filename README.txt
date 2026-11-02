@@ -1,4 +1,4 @@
-RMS / AZAHAR — PORTABLE iPHONEOS CORE BUILD CANDIDATE
+RMS / AZAHAR â€” PORTABLE iPHONEOS CORE BUILD CANDIDATE
 
 STATUS: local preparation only. Not compiled, uploaded, dispatched or installed.
 The runtime layout patch and the build recipe still need a real Mac build and device tests.
@@ -48,10 +48,10 @@ The artifact includes this portable source recipe, patch, lock and GPL license. 
 corresponding upstream/dependency sources use the fixed public commit and its submodules;
 no release publication is performed by this workflow.
 
-30 FPS AT FULL SPEED REMAINS UNMEASURED. This patch does not change video timing, emulation speed, guest
-CPU clock, audio, render rate or retro_run pacing. 1x resolution is not a 30 FPS cap. A safe
-render-only cap needs separate Vulkan image/fence and duplicate-frame work plus real gameplay
-measurement. Neither stable 30 FPS nor improved CPU/GPU cost is promised by this build.
+30 FPS GAMEPLAY PERFORMANCE REMAINS UNMEASURED. The optional Vulkan30 output mode below changes
+frontend cadence while retaining two complete60Hz guest frames per call. Guest CPU clock,
+audio generation and PICA rendering remain unchanged. Neither stable full-speed gameplay
+nor reduced CPU/GPU cost is promised. The separate40FPS request remains unimplemented.
 
 Required later checks: actual compiler result; static package inspection; retain current
 framework/configs; sign/trust under the existing jailbreak flow; test physical mapping,
@@ -60,7 +60,7 @@ controller disconnect/reconnect; ordinary in-game save/close/reopen; normal audi
 Keep quickstates disabled and preserve all complete per-game options, especially Ultrasole1x
 and Rubino2x. No forced restart during a game with unsaved progress.
 
-EXPERIMENTAL CPU JIT CANDIDATE — LOCAL, NOT BUILT OR DEVICE TESTED
+EXPERIMENTAL CPU JIT CANDIDATE â€” LOCAL, NOT BUILT OR DEVICE TESTED
 Option citra_ios_cpu_jit defaults to disabled. jit_if_available runs a bounded
 RX -> RW -> emit -> icache -> RX worker test inside the actual RetroArch process,
 verifying return42 and then return43 after rewriting the same allocation. A failed
@@ -85,3 +85,47 @@ Host mock policy tests cover failed allocation, first/second RW and RX failure,
 wrong emitted return value, cleanup and the successful two-call ordering. They
 use no executable memory. The unchanged RT/R3 policy tests remain included.
 A future authorized Mac build and explicit on-device testing are still required.
+
+
+EXPERIMENTAL VULKAN30 OUTPUT CANDIDATE — NOT BUILT OR DEVICE TESTED
+Option citra_rms_output_fps defaults to60. Select30 per game, then close/reopen
+content. Selection is frozen during retro_load_game, before initial AV-info
+query; context_reset is later. Live option changes are deferred to content reload.
+30 mode refuses soft reset, quick states and context replacement; close/reopen
+content instead. It retains all published slots through a refused soft reset.
+Normal in-game saves are
+unaffected. Non-Vulkan content retains60. A compliant libretro frontend
+queries AV info only after successful content load; RetroArch1.22.2 follows this.
+
+At30 the frontend calls retro_run30times/sec and each call completes two entire
+guest frames. Both VBlanks, guest CPU/PICA work, input polls and audio generation
+remain. Both internal set_image AND video_cb calls are omitted while both
+boundaries still complete. The second image is staged, then published exactly
+once after both Core RunLoops return and the final GPU work has been drained.
+This is not frontend slow motion, a guest CPU underclock or a PICA/draw discard.
+
+Each raw frontend sync index owns a distinct image, view, framebuffer and
+persistent descriptor. The frame vector remains fixed for that renderer. Only
+the slot released by wait_sync_index may be changed or resized; all other
+images and metadata stay alive, including across RT layout changes. No modulo
+mapping aliases different frontend indices. Mask changes and secondary output
+windows are refused. Queue idle alone is not used as a frontend image lease.
+
+The Vulkan interface/device/queue identity and required callbacks are validated.
+An immutable interface snapshot is captured before the Scheduler exists; Begin
+and context reset never write a worker-shared interface while the renderer lives.
+One frontend wait_sync_index/get_sync_index is cached across both guest frames.
+Initially, between guest frames and after BOTH RunLoops, the core drains Finish
+and WaitWorker, then takes submit_mutex followed by the frontend queue lock and
+waits for graphics queue idle. These conservative waits can REDUCE throughput;
+they make no performance promise. Missing/changed interfaces or synchronization
+failures latch the run stopped and request frontend shutdown, with no silent
+one-frame/two-frame fallback under mismatched frontend timing.
+
+The existing host policy test now covers load-latching, deferred changes, hidden
+internal images, one late publication, reset/reentry/failure behavior, raw index
+leases/mask holes/slot31 and the30calls/two-frames clock arithmetic. It does not
+run a GPU, audio or real game.
+Mac compilation, static artifact checks and separately authorized device tests
+remain required. Validate normal game clock/audio plus actual output images;
+a30FPS counter alone is insufficient evidence of full-speed gameplay.

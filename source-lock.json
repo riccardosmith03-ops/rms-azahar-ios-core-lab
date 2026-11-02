@@ -3,31 +3,31 @@
   "upstream_tag": "2127.0-alpha3",
   "upstream_commit": "f570b53f9c9bcf42b0741afdd8cf0a6dfa5f98f5",
   "patch": "patches/0001-rms-runtime-layout.patch",
-  "patch_sha256": "936d261436daf2c3dad8907b6f3839f8e0502bdfb037fb3c7a13255279965d41",
+  "patch_sha256": "880f2f04e23fc2f02e0c51f0c1cf7123a8cf39fa2abf9b8eb5e1df9d0eccffa5",
   "files": [
     {
       "path": "src/citra_libretro/citra_libretro.cpp",
       "before_sha256": "51861854dfe1d2e249d88c681da0df035dcdb8932f4b57cad7dbdc07a7eb83bc",
-      "after_sha256": "3700e6df48929bc0db5bac9d7955c2780c20ebf4209f55599f81fdcc34300f9d",
-      "after_bytes": 30720
+      "after_sha256": "049d683072b4b063ef6ebc6d2574b5dbb18b13fb4ee9af42efe4eedfc5d15f90",
+      "after_bytes": 36505
     },
     {
       "path": "src/citra_libretro/core_settings.cpp",
       "before_sha256": "f10b3adca2ac9960e38d4e573ca96874da82f5021ba9071d3082d76f710fca56",
-      "after_sha256": "2aeb67f2d1ad37a07d2cda74335783419bdd41d2cbd4ebdaaf5f53dc8fabdfb2",
-      "after_bytes": 43476
+      "after_sha256": "4620002b8982b32e8c3589ad8cd721bd9ccb64f4c456eaede0c8529be21eaf97",
+      "after_bytes": 44373
     },
     {
       "path": "src/citra_libretro/core_settings.h",
       "before_sha256": "e266ea8ccba8e7f427dbcf86c8d04fd4dc40a68df61548cafaa05eafc6f1e7e5",
-      "after_sha256": "d336bdf17c3dff3ebe0e4f5963662dafb40096ee8a266b068dbc8a3a2315f3cd",
-      "after_bytes": 934
+      "after_sha256": "f1e88125627f959a3cab7585513ea3e891c7975188e300dc85d645a375a2197d",
+      "after_bytes": 1015
     },
     {
       "path": "src/citra_libretro/emu_window/libretro_window.cpp",
       "before_sha256": "b91c1f9a1f180bb4fa991a144b2ffdf2bb8833dd56c2b0d7e95510709a1ac29d",
-      "after_sha256": "0b1d02adf36a110fcca753db12c9f92194d61dfa37bbfc350c85202eea4ea900",
-      "after_bytes": 11524
+      "after_sha256": "abd2b405c3db67d1209d34babf6aa8e444cd59b291ce4a09b8c9a68e6bdc0540",
+      "after_bytes": 11733
     },
     {
       "path": "src/citra_libretro/input/input_factory.cpp",
@@ -58,6 +58,36 @@
       "before_sha256": "13f9b6fc1ae6f1bf8b769e8a1e41ec633766bc3c088d74f60f6d7d29d69e1e2e",
       "after_sha256": "29c9b02ea5ef8b03b18ebbe74524a57b7954fae69db1c582c7873f40c50d8b0b",
       "after_bytes": 41132
+    },
+    {
+      "path": "src/citra_libretro/environment.cpp",
+      "before_sha256": "221ce4744d6f797599f5b631599b9e8a3e8f04ab079a35de36ec7f9882fc466b",
+      "after_sha256": "05f9a48ff705d28ab1675a5b935b3863de38957fdb10a0353db8bdfeb33e47ac",
+      "after_bytes": 9800
+    },
+    {
+      "path": "src/citra_libretro/libretro_vk.cpp",
+      "before_sha256": "48d5d69e6b788aa11a13c8b66ce0fa7db6f2760a45a07a021f4b70c4257dcbe4",
+      "after_sha256": "4a8e5579564facf7eb5c5eef62e7e2ee1de4e20f6bb4a1912e9552903b2f4f36",
+      "after_bytes": 49569
+    },
+    {
+      "path": "src/citra_libretro/libretro_vk.h",
+      "before_sha256": "32c357137c5e13f35238492b47b9db7bac0d017c7aeeb1aa56653ca4f47073c2",
+      "after_sha256": "5b7969d36ada4cb5522b1e4ae532bbd9b37b2e99fb5d99e2ae00eb9dba452979",
+      "after_bytes": 6070
+    },
+    {
+      "path": "src/citra_libretro/runtime_frame_pump.h",
+      "before_sha256": null,
+      "after_sha256": "2b61dce85dcd8e7be4e85445f6265e60c80d9e4d976b2733c866673ebf211124",
+      "after_bytes": 3569
+    },
+    {
+      "path": "src/video_core/renderer_vulkan/renderer_vulkan.cpp",
+      "before_sha256": "41bfdbbbb32f54d7d05c0f790cd9e9095161a8b90d360101ef23cdcf7f165f94",
+      "after_sha256": "5fa82e42098f4c0779b94457c6aefaccdab4b538f0f7aa2754437127933ada16",
+      "after_bytes": 62413
     }
   ],
   "protected_build_sources": {
@@ -102,7 +132,7 @@
     "executable": "azahar.libretro",
     "install_name": "@rpath/azahar.libretro.framework/azahar.libretro"
   },
-  "scope": "Preserved RT/R3 layout plus default-off experimental CPU-only iOS JIT; no clock/audio/frame pacing changes or measured performance claim",
+  "scope": "Preserved RT/R3 and default-off CPUJIT; default60/load-latched Vulkan30 output with two full guest frames, independent per-index images and late publication; no throughput claim",
   "dependency_files": [
     {
       "path": "externals/oaknut/include/oaknut/code_block.hpp",
@@ -121,5 +151,21 @@
     "oaknut_failure_after_selection": "fixed phase/errno diagnostic then process _Exit(86); no live fallback or unwind",
     "shader_jit": "remains disabled on IOS",
     "same_process_permission_probe_run": false
+  },
+  "frame_pump_policy": {
+    "option": "citra_rms_output_fps",
+    "default": "60",
+    "restart_required": true,
+    "mode_30": "two complete guest frames per30Hz hostcall; both internal callbacks omitted; publish once after both RunLoops return",
+    "frontend_sync": "one wait_sync_index/get_sync_index perhostcall; cached for both guest frames",
+    "image_ownership": "independent image/view/FBO/persistent descriptor per raw sync index; resize only the released index; fixed mask; no modulo aliasing",
+    "gpu_order": "Finish then WaitWorker then submit_mutex then frontendqueue lock then queue.waitIdle; initial, between frames and after both RunLoops before publication",
+    "interface_binding": "immutable snapshot captured before Scheduler construction; refuse context/pointer/device/queue replacement before global writes",
+    "quickstates_30": "unsupported; normal in-game saves unaffected",
+    "soft_reset_30": "refused before Shutdown; close/reopen content to release all slots",
+    "failure": "latched stop and frontendshutdown request; no timing-mismatched livefallback",
+    "guest_cpu_clock_audio_changed": false,
+    "pica_draw_work_skipped": false,
+    "compiled_or_device_tested": false
   }
 }

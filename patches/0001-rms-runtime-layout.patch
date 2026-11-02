@@ -74,15 +74,17 @@
  
 --- a/src/citra_libretro/citra_libretro.cpp
 +++ b/src/citra_libretro/citra_libretro.cpp
-@@ -62,6 +62,7 @@
+@@ -61,7 +61,9 @@
+     Common::Log::Filter log_filter;
      std::unique_ptr<EmuWindow_LibRetro> emu_window;
      bool game_loaded = false;
++    bool frame_pump_failed = false;
      bool first_run_loop = true;
 +    LibRetro::RuntimeLayoutState runtime_layout;
      struct retro_hw_render_callback hw_render{};
  };
  
-@@ -211,6 +212,34 @@
+@@ -211,10 +213,64 @@
      Core::System::GetInstance().ApplySettings();
  }
  
@@ -117,7 +119,37 @@
  /**
   * libretro callback; Called every game tick.
   */
-@@ -239,34 +268,41 @@
++static void ResetFramePumpTransient() {
++    LibRetro::settings.frame_pump.EndRun();
++#ifdef ENABLE_VULKAN
++    LibRetro::EndVulkan30HzRun();
++#endif
++    if (emu_instance && emu_instance->emu_window) {
++        (void)emu_instance->emu_window->HasSubmittedFrame();
++    }
++}
++
++static void StopThirtyFramePump(const char* reason) {
++    emu_instance->frame_pump_failed = true;
++    LOG_ERROR(Frontend, "30Hz output stopped: {}", reason);
++    LibRetro::DisplayMessage("30 FPS output stopped safely. Close content and select 60 FPS.");
++    (void)LibRetro::Shutdown();
++}
++
+ void retro_run() {
++    if (emu_instance->frame_pump_failed) {
++        // No guest execution or fabricated pacing fallback after a failed run.
++        (void)LibRetro::Shutdown();
++        return;
++    }
++    if (!emu_instance->game_loaded && LibRetro::settings.frame_pump.IsThirty()) {
++        StopThirtyFramePump("content did not initialize");
++        return;
++    }
+     if (!emu_instance->game_loaded) {
+         // Game failed to load (e.g. encrypted ROM, bad path).
+         // Present an empty frame so RetroArch doesn't hang.
+@@ -239,34 +295,41 @@
      // Check if the screen swap button is pressed
      static bool screen_swap_button_state = false;
      static bool screens_swapped = false;
@@ -187,22 +219,245 @@
      }
  
  #ifdef ENABLE_OPENGL
-@@ -501,6 +537,7 @@
+@@ -284,25 +347,86 @@
+         Core::System::GetInstance().RegisterCoreLoopThreadId();
+     }
+ 
+-    while (!emu_instance->emu_window->HasSubmittedFrame()) {
+-        auto result = Core::System::GetInstance().RunLoop();
+-
+-        if (result != Core::System::ResultStatus::Success) {
+-            std::string errorContent = Core::System::GetInstance().GetStatusDetails();
+-            std::string msg;
+-
+-            switch (result) {
+-            case Core::System::ResultStatus::ErrorSystemFiles:
+-                msg = "Azahar was unable to locate a 3DS system archive: " + errorContent;
+-                break;
+-            default:
+-                msg = "Fatal Error encountered (" + std::to_string(static_cast<int>(result)) +
+-                      "): " + errorContent;
+-                break;
++    auto& pump = LibRetro::settings.frame_pump;
++    const bool thirty = pump.IsThirty();
++    const unsigned frame_budget = pump.GuestFramesPerRun();
++    struct RunGuard {
++        LibRetro::RuntimeFramePump& pump;
++        bool active;
++        ~RunGuard() {
++            if (active) {
++#ifdef ENABLE_VULKAN
++                LibRetro::EndVulkan30HzRun();
++#endif
++                pump.EndRun();
+             }
+-
+-            LibRetro::DisplayMessage(msg.c_str());
+-        }
++        }
++    } run_guard{pump, thirty};
++    if (thirty) {
++        // A stale presentation from serialization/reset is not a new guest frame.
++        (void)emu_instance->emu_window->HasSubmittedFrame();
++        if (Settings::values.graphics_api.GetValue() != Settings::GraphicsAPI::Vulkan ||
++            Settings::values.use_skip_duplicate_frames.GetValue() || !pump.BeginRun()) {
++            StopThirtyFramePump("unsupported live renderer, duplicate-frame policy or reentry");
++            return;
++        }
++#ifdef ENABLE_VULKAN
++        if (!LibRetro::BeginVulkan30HzRun()) {
++            StopThirtyFramePump("Vulkan frontend ownership interface unavailable or changed");
++            return;
++        }
++#else
++        StopThirtyFramePump("Vulkan support is not compiled");
++        return;
++#endif
++    }
++    for (unsigned frame = 0; frame < frame_budget; ++frame) {
++        while (!emu_instance->emu_window->HasSubmittedFrame()) {
++            auto result = Core::System::GetInstance().RunLoop();
++
++            if (result != Core::System::ResultStatus::Success) {
++                std::string errorContent = Core::System::GetInstance().GetStatusDetails();
++                std::string msg;
++
++                switch (result) {
++                case Core::System::ResultStatus::ErrorSystemFiles:
++                    msg = "Azahar was unable to locate a 3DS system archive: " + errorContent;
++                    break;
++                default:
++                    msg = "Fatal Error encountered (" + std::to_string(static_cast<int>(result)) +
++                          "): " + errorContent;
++                    break;
++                }
++
++                LibRetro::DisplayMessage(msg.c_str());
++                if (thirty) {
++                    StopThirtyFramePump("guest frame did not complete successfully");
++                    return;
++                }
++            }
++        }
++        if (thirty) {
++#ifdef ENABLE_VULKAN
++            if (pump.Failed() || LibRetro::Vulkan30HzRunFailed() || !pump.CompleteGuestFrame()) {
++                StopThirtyFramePump("guest frame ownership/publication failed");
++                return;
++            }
++            if (frame + 1 < frame_budget && !LibRetro::SynchronizeVulkan30HzRun()) {
++                StopThirtyFramePump("inter-frame graphics queue wait failed");
++                return;
++            }
++#endif
++        }
++    }
++    if (thirty) {
++#ifdef ENABLE_VULKAN
++        // Both RunLoops have returned: include any follow-on GPU work after the
++        // last VBlank before publishing the staged image to the frontend.
++        if (!LibRetro::SynchronizeVulkan30HzRun() || !pump.PreparePublication() ||
++            !LibRetro::PublishVulkan30HzRun() || !pump.RunSucceeded()) {
++            StopThirtyFramePump("the two-frame run did not publish exactly one image");
++        }
++#endif
+     }
+ }
+ 
+@@ -425,6 +549,9 @@
+ #endif
+ 
+ static void context_reset() {
++    ResetFramePumpTransient();
++    if (emu_instance->frame_pump_failed && LibRetro::settings.frame_pump.IsThirty())
++        return; // A lost30Hz context requires content close/reopen, not rebinding.
+     LOG_DEBUG(Frontend, "context_reset");
+ 
+     switch (Settings::values.graphics_api.GetValue()) {
+@@ -461,6 +588,11 @@
+ #ifdef ENABLE_VULKAN
+     case Settings::GraphicsAPI::Vulkan:
+         LibRetro::VulkanResetContext();
++        if (LibRetro::settings.frame_pump.IsThirty() && LibRetro::Vulkan30HzContextRefused()) {
++            emu_instance->frame_pump_failed = true;
++            LibRetro::DisplayMessage("30 FPS Vulkan context changed. Close and reopen content.");
++            return;
++        }
+         break;
+ #endif
+     default:
+@@ -481,6 +613,16 @@
+ }
+ 
+ static void context_destroy() {
++    ResetFramePumpTransient();
++#ifdef ENABLE_VULKAN
++    if (emu_instance->game_loaded && LibRetro::settings.frame_pump.IsThirty() &&
++        Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::Vulkan) {
++        // The frontend's context-destroy contract ends image use before invalidation.
++        emu_instance->frame_pump_failed = true;
++        Core::System::GetInstance().GPU().ReleaseRenderer();
++        LibRetro::DisplayMessage("30 FPS Vulkan context lost. Close and reopen content.");
++    }
++#endif
+     LOG_DEBUG(Frontend, "context_destroy");
+     if (emu_instance->game_loaded &&
+         Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::OpenGL) {
+@@ -491,6 +633,14 @@
+ }
+ 
+ void retro_reset() {
++    if (LibRetro::settings.frame_pump.IsThirty()) {
++        // Reset is not a context-destroy/release of all frontend image slots.
++        // Keep every published image/descriptor alive until content is closed.
++        LibRetro::DisplayMessage("30 FPS output: close and reopen content to reset.");
++        return;
++    }
++    ResetFramePumpTransient();
++    emu_instance->frame_pump_failed = false;
+     LOG_DEBUG(Frontend, "retro_reset");
+     Core::System::GetInstance().Shutdown();
+     emu_instance->game_loaded = do_load_game();
+@@ -501,6 +651,10 @@
   * libretro callback; Called when a game is to be loaded.
   */
  bool retro_load_game(const struct retro_game_info* info) {
++    ResetFramePumpTransient();
++    LibRetro::settings.frame_pump.ResetContent();
++    emu_instance->frame_pump_failed = false;
 +    emu_instance->runtime_layout.Reset();
      LOG_INFO(Frontend, "Starting Azahar RetroArch game...");
  
  #if CITRA_ARCH(x86_64) && CITRA_HAS_SSE42
-@@ -633,6 +670,7 @@
+@@ -513,6 +667,14 @@
+ #endif
+ 
+     UpdateSettings();
++    // libretro queries initial AV info only AFTER retro_load_game succeeds.
++    // Latch before that query; context_reset happens later in the frontend.
++#ifdef ENABLE_VULKAN
++    LibRetro::settings.frame_pump.LatchForContent(
++        Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::Vulkan);
++#else
++    LibRetro::settings.frame_pump.LatchForContent(false);
++#endif
+ 
+     // If using HW rendering, don't actually load the game here. azahar wants
+     // the graphics context ready and available before calling System::Load.
+@@ -633,6 +795,10 @@
  }
  
  void retro_unload_game() {
++    ResetFramePumpTransient();
++    LibRetro::settings.frame_pump.ResetContent();
++    emu_instance->frame_pump_failed = false;
 +    emu_instance->runtime_layout.Reset();
      LOG_DEBUG(Frontend, "Unloading game...");
      Core::System::GetInstance().Shutdown();
  }
+@@ -663,6 +829,7 @@
+ /// points between frames; the 5-second timeout (matching RunLoop's existing handler)
+ /// covers the pathological case.
+ static bool DrainAsyncOperations(Core::System& system) {
++    ResetFramePumpTransient();
+     if (!system.KernelRunning() || !system.Kernel().AreAsyncOperationsPending()) {
+         return true;
+     }
+@@ -690,6 +857,7 @@
+ std::optional<std::vector<u8>> savestate = {};
+ 
+ size_t retro_serialize_size() {
++    if (LibRetro::settings.frame_pump.IsThirty()) return 0; //30Hz quickstates unsupported.
+     auto& system = Core::System::GetInstance();
+     if (!system.IsPoweredOn())
+         return 0;
+@@ -710,6 +878,7 @@
+ }
+ 
+ bool retro_serialize(void* data, size_t size) {
++    if (LibRetro::settings.frame_pump.IsThirty()) return false; //30Hz quickstates unsupported.
+     if (!savestate.has_value())
+         return false;
+     if (size < savestate->size())
+@@ -720,6 +889,7 @@
+ }
+ 
+ bool retro_unserialize(const void* data, size_t size) {
++    if (LibRetro::settings.frame_pump.IsThirty()) return false; //30Hz quickstates unsupported.
+     auto& system = Core::System::GetInstance();
+     if (!system.IsPoweredOn())
+         return false;
+@@ -730,7 +900,9 @@
+ 
+     std::vector<u8> buffer(static_cast<const u8*>(data), static_cast<const u8*>(data) + size);
+     try {
+-        return system.LoadStateBuffer(std::move(buffer));
++        const bool loaded = system.LoadStateBuffer(std::move(buffer));
++        ResetFramePumpTransient();
++        return loaded;
+     } catch (const std::exception& e) {
+         LOG_ERROR(Frontend, "Error loading state: {}", e.what());
+         return false;
 --- a/src/citra_libretro/core_settings.cpp
 +++ b/src/citra_libretro/core_settings.cpp
 @@ -10,6 +10,9 @@
@@ -252,9 +507,27 @@
      {
          config::cpu::use_cpu_jit,
          "Enable CPU JIT",
-@@ -472,6 +496,27 @@
+@@ -471,7 +495,45 @@
+         config::disabled
      },
  
++    {
++        "citra_rms_output_fps",
++        "Output Frame Rate (restart required, Vulkan)",
++        "Output Frame Rate",
++        "60 preserves the original frame pump. 30 advances two complete guest frames "
++        "per frontend call and publishes only the second image. Guest clock and audio "
++        "remain unchanged. Vulkan only; close and reopen content to change. "
++        "Extra GPU waits may reduce performance; this does not skip PICA rendering.",
++        nullptr,
++        config::category::graphics,
++        {
++            { "60", "60 (original)" },
++            { "30", "30 (two guest frames, experimental)" },
++            { nullptr, nullptr }
++        },
++        "60"
++    },
      // Layout Category
 +    {
 +        "citra_rms_layout_hotkey",
@@ -280,7 +553,7 @@
      {
          config::layout::layout_option,
          "Screen Layout",
-@@ -843,10 +888,16 @@
+@@ -843,10 +905,16 @@
  }
  
  static void ParseCpuOptions(void) {
@@ -300,7 +573,7 @@
          LibRetro::FetchVariable(config::cpu::use_cpu_jit, config::enabled) == config::enabled;
  #endif
  
-@@ -1118,6 +1169,12 @@
+@@ -1118,6 +1186,12 @@
  }
  
  static void ParseInputOptions(void) {
@@ -313,28 +586,51 @@
      LibRetro::settings.analog_function = GetAnalogFunction(
          LibRetro::FetchVariable(config::input::analog_function, "c_stick_and_touchscreen"));
  
+@@ -1158,6 +1232,9 @@
+ }
+ 
+ void ParseCoreOptions(void) {
++    // A requested change never changes the load-latched frontend timing mid-game.
++    LibRetro::settings.frame_pump.Request(
++        LibRetro::FetchVariable("citra_rms_output_fps", "60") == "30" ? 30 : 60);
+     // Override default values that aren't user-selectable and aren't correct for the core
+     Settings::values.enable_audio_stretching = false;
+     Settings::values.frame_limit = 0;
 --- a/src/citra_libretro/core_settings.h
 +++ b/src/citra_libretro/core_settings.h
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,8 @@
  #pragma once
  
  #include <string>
 +#include "citra_libretro/runtime_layout_hotkey.h"
++#include "citra_libretro/runtime_frame_pump.h"
  #include "core/hle/service/cfg/cfg.h"
  
  namespace LibRetro {
-@@ -29,6 +30,8 @@
+@@ -29,6 +31,10 @@
  
      std::string swap_screen_mode;
  
 +    RuntimeLayoutHotkey runtime_layout_hotkey = RuntimeLayoutHotkey::Disabled;
++
++    RuntimeFramePump frame_pump;
 +
      bool enable_motion;
  
      float motion_sensitivity;
 --- a/src/citra_libretro/emu_window/libretro_window.cpp
 +++ b/src/citra_libretro/emu_window/libretro_window.cpp
-@@ -296,6 +296,11 @@
+@@ -69,6 +69,9 @@
+     if (suppressPresentation)
+         return;
+     submittedFrame = true;
++    // The first internal frame still completes retro_run's guest-frame wait.
++    if (!LibRetro::settings.frame_pump.TakeVideoFrame())
++        return;
+ 
+     switch (Settings::values.graphics_api.GetValue()) {
+     case Settings::GraphicsAPI::OpenGL: {
+@@ -296,11 +299,16 @@
      auto geom = ComputeLayoutGeometry();
      unsigned baseX = geom.width;
      unsigned baseY = geom.height;
@@ -346,6 +642,23 @@
      enableEmulatedPointer = geom.emulated_pointer;
  
      // Update Libretro with our status
+     struct retro_system_av_info info{};
+-    info.timing.fps = 60.0;
++    info.timing.fps = static_cast<double>(LibRetro::settings.frame_pump.OutputFps());
+     info.timing.sample_rate = AudioCore::native_sample_rate;
+     info.geometry.aspect_ratio = (float)baseX / (float)baseY;
+     info.geometry.base_width = baseX;
+--- a/src/citra_libretro/environment.cpp
++++ b/src/citra_libretro/environment.cpp
+@@ -303,7 +303,7 @@
+ }
+ 
+ void retro_get_system_av_info(struct retro_system_av_info* info) {
+-    info->timing.fps = 60.0;
++    info->timing.fps = static_cast<double>(LibRetro::settings.frame_pump.OutputFps());
+     info->timing.sample_rate = AudioCore::native_sample_rate;
+ 
+     // Compute geometry from current settings so the frontend allocates the
 --- a/src/citra_libretro/input/input_factory.cpp
 +++ b/src/citra_libretro/input/input_factory.cpp
 @@ -12,6 +12,7 @@
@@ -387,6 +700,659 @@
  
          // TODO: Provide config option for ratios here
          auto widthSpeed = (layout.bottom_screen.GetWidth() / 20.0);
+--- a/src/citra_libretro/libretro_vk.cpp
++++ b/src/citra_libretro/libretro_vk.cpp
+@@ -10,6 +10,7 @@
+ #include <fmt/format.h>
+ 
+ #include "citra_libretro/environment.h"
++#include "citra_libretro/core_settings.h"
+ #include "citra_libretro/libretro_vk.h"
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+@@ -20,6 +21,52 @@
+ #include <vk_mem_alloc.h>
+ 
+ static const struct retro_hw_render_interface_vulkan* vulkan_intf;
++
++// Accessed only by the core/frontend thread. Worker submission retains the
++// existing submit_mutex -> frontend queue-lock order.
++struct Vulkan30HzContext {
++    const retro_hw_render_interface_vulkan* interface = nullptr;
++    Vulkan::Scheduler* scheduler = nullptr;
++    Vulkan::PresentWindow* pending_window = nullptr;
++    Vulkan::Frame* pending_frame = nullptr;
++    u32 sync_index = 0;
++    u32 sync_mask = 0;
++    bool active = false;
++    bool failed = false;
++};
++static Vulkan30HzContext frame_pump_context;
++static VkInstance accepted_instance = VK_NULL_HANDLE;
++static VkDevice accepted_device = VK_NULL_HANDLE;
++static VkQueue accepted_queue = VK_NULL_HANDLE;
++static u32 accepted_queue_family = 0;
++static const retro_hw_render_interface_vulkan* accepted_frontend_pointer = nullptr;
++static retro_hw_render_interface_vulkan immutable_30_interface{};
++static Vulkan::Scheduler* accepted_scheduler = nullptr;
++static u32 accepted_sync_mask = 0;
++static bool context_30_refused = false;
++
++static bool Matches30HzOwner(const retro_hw_render_interface_vulkan* current) {
++    return current && current->interface_type == RETRO_HW_RENDER_INTERFACE_VULKAN &&
++           current->interface_version >= RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION &&
++           current == accepted_frontend_pointer &&
++           current->instance == accepted_instance && current->device == accepted_device &&
++           current->queue == accepted_queue && current->queue_index == accepted_queue_family &&
++           current->handle == immutable_30_interface.handle &&
++           current->set_image == immutable_30_interface.set_image &&
++           current->wait_sync_index == immutable_30_interface.wait_sync_index &&
++           current->get_sync_index == immutable_30_interface.get_sync_index &&
++           current->get_sync_index_mask == immutable_30_interface.get_sync_index_mask &&
++           current->lock_queue == immutable_30_interface.lock_queue &&
++           current->unlock_queue == immutable_30_interface.unlock_queue;
++}
++
++static void Fail30HzFrame(Frontend::EmuWindow& window, const char* reason) {
++    frame_pump_context.failed = true;
++    LibRetro::settings.frame_pump.FailRun();
++    LOG_ERROR(Render_Vulkan, "30Hz frame ownership failed: {}", reason);
++    if (LibRetro::settings.frame_pump.IsRunning()) window.SwapBuffers();
++}
++
+ 
+ namespace LibRetro {
+ 
+@@ -223,13 +270,109 @@
+ }
+ 
+ void VulkanResetContext() {
+-    LibRetro::GetHWRenderInterface((void**)&vulkan_intf);
+-
+-    // Initialize dispatcher with LibRetro's function pointers
++    EndVulkan30HzRun();
++    void* raw = nullptr;
++    LibRetro::GetHWRenderInterface(&raw);
++    const auto* current = static_cast<const retro_hw_render_interface_vulkan*>(raw);
++    if (settings.frame_pump.IsThirty() &&
++        (!current || current->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN ||
++         current->interface_version < RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION)) {
++        context_30_refused = true;
++        return;
++    }
++    if (settings.frame_pump.IsThirty() && accepted_scheduler) {
++        // Refuse BEFORE any shared-pointer or dispatcher write. Workers own the
++        // immutable snapshot until this renderer has been fully destroyed.
++        if (!Matches30HzOwner(current)) context_30_refused = true;
++        return;
++    }
++    vulkan_intf = current;
+     VULKAN_HPP_DEFAULT_DISPATCHER.init(vulkan_intf->get_instance_proc_addr);
+ 
+     vk::Instance vk_instance{vulkan_intf->instance};
+     VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_instance);
++}
++
++bool Vulkan30HzContextRefused() { return context_30_refused; }
++
++bool BeginVulkan30HzRun() {
++    EndVulkan30HzRun();
++    void* raw_interface = nullptr;
++    if (!settings.frame_pump.IsThirty() || !settings.frame_pump.IsRunning() ||
++        !GetHWRenderInterface(&raw_interface) || !raw_interface) {
++        return false;
++    }
++    const auto* current = static_cast<const retro_hw_render_interface_vulkan*>(raw_interface);
++    if (current->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN ||
++        current->interface_version < RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION) {
++        return false;
++    }
++    if (!current->handle || !current->set_image || !current->wait_sync_index ||
++        !current->get_sync_index || !current->get_sync_index_mask ||
++        !current->lock_queue || !current->unlock_queue || context_30_refused ||
++        !accepted_scheduler || !Matches30HzOwner(current) ||
++        !VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueWaitIdle ||
++        current->instance != accepted_instance || current->device != accepted_device ||
++        current->queue != accepted_queue || !accepted_queue ||
++        current->queue_index != accepted_queue_family) {
++        return false;
++    }
++    // The frontend owns the image until this one acquisition per host retro_run.
++    current->wait_sync_index(current->handle);
++    const u32 mask = current->get_sync_index_mask(current->handle);
++    const u32 index = current->get_sync_index(current->handle);
++    if (mask != accepted_sync_mask || index >= 32 || (mask & (u32{1} << index)) == 0)
++        return false;
++    frame_pump_context.interface = &immutable_30_interface;
++    frame_pump_context.scheduler = accepted_scheduler;
++    frame_pump_context.sync_mask = mask;
++    frame_pump_context.sync_index = index;
++    frame_pump_context.active = true;
++    // No global interface write while VulkanWorker could read it.
++    return SynchronizeVulkan30HzRun();
++}
++
++bool SynchronizeVulkan30HzRun() {
++    auto& context = frame_pump_context;
++    if (!context.active || context.failed || !context.scheduler ||
++        context.interface != vulkan_intf) {
++        return false;
++    }
++    try {
++        // Flush enqueues worker work only. Finish and WaitWorker must precede
++        // taking submit_mutex, otherwise the worker could deadlock on that lock.
++        context.scheduler->Finish();
++        context.scheduler->WaitWorker();
++        std::scoped_lock submit_lock{context.scheduler->submit_mutex};
++        struct FrontendQueueLock {
++            const retro_hw_render_interface_vulkan* interface;
++            explicit FrontendQueueLock(const retro_hw_render_interface_vulkan* value)
++                : interface{value} { interface->lock_queue(interface->handle); }
++            ~FrontendQueueLock() { interface->unlock_queue(interface->handle); }
++        } queue_lock{context.interface};
++        vk::Queue{context.interface->queue}.waitIdle();
++        return true;
++    } catch (const std::exception& error) {
++        LOG_ERROR(Render_Vulkan, "30Hz frame pump queue synchronization failed: {}", error.what());
++        context.failed = true;
++        settings.frame_pump.FailRun();
++        return false;
++    }
++}
++
++bool Vulkan30HzRunFailed() {
++    return !frame_pump_context.active || frame_pump_context.failed;
++}
++
++bool PublishVulkan30HzRun() {
++    auto& context = frame_pump_context;
++    if (!context.active || context.failed || !context.pending_window || !context.pending_frame)
++        return false;
++    return context.pending_window->PublishFramePumpImage(context.pending_frame);
++}
++
++void EndVulkan30HzRun() {
++    frame_pump_context = {};
+ }
+ 
+ } // namespace LibRetro
+@@ -273,6 +416,27 @@
+         throw std::runtime_error("LibRetro Vulkan interface not available");
+     }
+ 
++    if (LibRetro::settings.frame_pump.IsThirty()) {
++        if (accepted_scheduler)
++            throw std::runtime_error("A previous30Hz renderer is still active");
++        void* raw_frontend = nullptr;
++        if (!LibRetro::GetHWRenderInterface(&raw_frontend) || !raw_frontend)
++            throw std::runtime_error("30Hz frontend interface unavailable");
++        vulkan_intf = static_cast<const retro_hw_render_interface_vulkan*>(raw_frontend);
++        if (vulkan_intf->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN ||
++            vulkan_intf->interface_version < RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION ||
++            !vulkan_intf->handle || !vulkan_intf->set_image ||
++            !vulkan_intf->wait_sync_index || !vulkan_intf->get_sync_index ||
++            !vulkan_intf->get_sync_index_mask || !vulkan_intf->lock_queue ||
++            !vulkan_intf->unlock_queue)
++            throw std::runtime_error("30Hz frontend ownership interface unavailable");
++        // Instance construction precedes Scheduler construction. Capture once;
++        // no worker exists yet, and no later Begin/context callback may rebind.
++        accepted_frontend_pointer = vulkan_intf;
++        immutable_30_interface = *vulkan_intf;
++        vulkan_intf = &immutable_30_interface;
++        context_30_refused = false;
++    }
+     // Initialize basic Vulkan objects from LibRetro
+     physical_device = vulkan_intf->gpu;
+     if (!physical_device) {
+@@ -299,6 +463,12 @@
+         throw std::runtime_error("Invalid graphics queue from LibRetro");
+     }
+ 
++    // Bind to the objects that own this renderer's resources. A later frontend
++    // context reset must not bless a new queue/device while old resources live.
++    accepted_instance = vulkan_intf->instance;
++    accepted_device = vulkan_intf->device;
++    accepted_queue = vulkan_intf->queue;
++    accepted_queue_family = vulkan_intf->queue_index;
+     // Initialize Vulkan HPP dispatcher with LibRetro's device
+     VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Device{vulkan_intf->device});
+ 
+@@ -356,6 +526,13 @@
+     : emu_window{emu_window_}, instance{instance_}, scheduler{scheduler_},
+       graphics_queue{instance.GetGraphicsQueue()} {
+     const vk::Device device = instance.GetDevice();
++    independent_frames = LibRetro::settings.frame_pump.IsThirty();
++    if (independent_frames) {
++        if (accepted_scheduler)
++            throw std::runtime_error("30Hz secondary output windows are unsupported");
++        if (!slot_lease.Configure(vulkan_intf->get_sync_index_mask(vulkan_intf->handle)))
++            throw std::runtime_error("30Hz frontend has no sync-index mask");
++    }
+ 
+     LOG_INFO(Render_Vulkan, "Initializing LibRetro PresentWindow");
+ 
+@@ -372,8 +549,26 @@
+ 
+     // Start with initial dimensions from layout
+     const auto& layout = emu_window.GetFramebufferLayout();
+-    CreateOutputTexture(layout.width, layout.height);
+-    CreateFrameResources();
++    if (independent_frames) {
++        output_width = layout.width;
++        output_height = layout.height;
++    } else {
++        CreateOutputTexture(layout.width, layout.height);
++    }
++    if (independent_frames) {
++        try {
++            CreateFrameResources();
++        } catch (...) {
++            DestroyFrameResources();
++            device.destroyCommandPool(command_pool);
++            device.destroyRenderPass(present_renderpass);
++            throw;
++        }
++        accepted_sync_mask = slot_lease.Mask();
++        accepted_scheduler = &scheduler;
++    } else {
++        CreateFrameResources();
++    }
+ 
+     LOG_INFO(Render_Vulkan, "LibRetro PresentWindow initialized with {}x{}", layout.width,
+              layout.height);
+@@ -400,6 +595,11 @@
+     }
+     if (present_renderpass) {
+         device.destroyRenderPass(present_renderpass);
++    }
++    if (independent_frames && accepted_scheduler == &scheduler) {
++        accepted_scheduler = nullptr;
++        accepted_frontend_pointer = nullptr;
++        accepted_sync_mask = 0;
+     }
+ }
+ 
+@@ -506,6 +706,55 @@
+     output_height = 0;
+ }
+ 
++void PresentWindow::CreateIndependentFrameImage(Frame& frame, u32 width, u32 height) {
++    const auto device = instance.GetDevice();
++    const vk::ImageCreateInfo info{
++        .imageType = vk::ImageType::e2D, .format = output_format,
++        .extent = {width, height, 1}, .mipLevels = 1, .arrayLayers = 1,
++        .samples = vk::SampleCountFlagBits::e1, .tiling = vk::ImageTiling::eOptimal,
++        .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc |
++                 vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
++        .sharingMode = vk::SharingMode::eExclusive, .initialLayout = vk::ImageLayout::eUndefined,
++    };
++    VmaAllocationCreateInfo allocation_info{};
++    allocation_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
++    allocation_info.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
++    VkImage image = VK_NULL_HANDLE;
++    if (vmaCreateImage(instance.GetAllocator(), reinterpret_cast<const VkImageCreateInfo*>(&info),
++                       &allocation_info, &image, &frame.allocation, nullptr) != VK_SUCCESS)
++        throw std::runtime_error("30Hz per-index image allocation failed");
++    frame.image = vk::Image{image};
++    frame.image_view_info = {
++        .image = frame.image, .viewType = vk::ImageViewType::e2D, .format = output_format,
++        .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
++                       vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity},
++        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
++    };
++    frame.image_view = device.createImageView(frame.image_view_info);
++    const vk::FramebufferCreateInfo framebuffer_info{
++        .renderPass = present_renderpass, .attachmentCount = 1,
++        .pAttachments = &frame.image_view, .width = width, .height = height, .layers = 1,
++    };
++    frame.framebuffer = device.createFramebuffer(framebuffer_info);
++    frame.width = width;
++    frame.height = height;
++    frame.image_descriptor.image_view = static_cast<VkImageView>(frame.image_view);
++    frame.image_descriptor.image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++    frame.image_descriptor.create_info = static_cast<VkImageViewCreateInfo>(frame.image_view_info);
++}
++
++void PresentWindow::DestroyIndependentFrameImage(Frame& frame) {
++    const auto device = instance.GetDevice();
++    if (frame.framebuffer) device.destroyFramebuffer(frame.framebuffer);
++    if (frame.image_view) device.destroyImageView(frame.image_view);
++    if (frame.image && frame.allocation)
++        vmaDestroyImage(instance.GetAllocator(), static_cast<VkImage>(frame.image), frame.allocation);
++    frame.framebuffer = nullptr;
++    frame.image_view = nullptr;
++    frame.image = nullptr;
++    frame.allocation = {};
++}
++
+ vk::RenderPass PresentWindow::CreateRenderpass() {
+     const vk::AttachmentDescription color_attachment = {
+         .format = output_format,
+@@ -552,7 +801,7 @@
+ 
+ void PresentWindow::CreateFrameResources() {
+     const vk::Device device = instance.GetDevice();
+-    const u32 frame_count = 2; // Double buffering for LibRetro
++    const u32 frame_count = independent_frames ? slot_lease.SlotCount() : 2;
+ 
+     // Destroy existing frames
+     DestroyFrameResources();
+@@ -573,13 +822,20 @@
+         Frame& frame = frame_pool[i];
+         frame.width = output_width;
+         frame.height = output_height;
+-        frame.image = output_image; // All frames use the same output texture
+-        frame.image_view = output_image_view;
++        if (!independent_frames) {
++            frame.image = output_image;
++            frame.image_view = output_image_view;
++        }
+         frame.allocation = {}; // VMA allocation handled separately
+         frame.cmdbuf = command_buffers[i];
+         frame.render_ready = device.createSemaphore({});
+         frame.present_done = device.createFence({.flags = vk::FenceCreateFlagBits::eSignaled});
+ 
++        if (independent_frames) {
++            if ((slot_lease.Mask() & (u32{1} << i)) != 0)
++                CreateIndependentFrameImage(frame, output_width, output_height);
++            continue;
++        }
+         // Create framebuffer for this frame
+         const vk::FramebufferCreateInfo fb_info = {
+             .renderPass = present_renderpass,
+@@ -603,7 +859,9 @@
+     const vk::Device device = instance.GetDevice();
+ 
+     for (auto& frame : frame_pool) {
+-        if (frame.framebuffer) {
++        if (independent_frames) {
++            DestroyIndependentFrameImage(frame);
++        } else if (frame.framebuffer) {
+             device.destroyFramebuffer(frame.framebuffer);
+         }
+         if (frame.render_ready) {
+@@ -622,6 +880,34 @@
+     if (frame_pool.empty()) {
+         LOG_ERROR(Render_Vulkan, "No frames available in LibRetro PresentWindow");
+         return nullptr;
++    }
++
++    if (independent_frames) {
++        u32 index = 0, mask = 0;
++        if (frame_pump_context.active) {
++            index = frame_pump_context.sync_index;
++            mask = frame_pump_context.sync_mask;
++            if (frame_pump_context.scheduler != &scheduler) {
++                Fail30HzFrame(emu_window, "renderer scheduler changed");
++                return nullptr;
++            }
++        } else {
++            void* raw = nullptr;
++            if (!LibRetro::GetHWRenderInterface(&raw) ||
++                !Matches30HzOwner(static_cast<const retro_hw_render_interface_vulkan*>(raw))) {
++                Fail30HzFrame(emu_window, "frontend changed outside frame pump");
++                return nullptr;
++            }
++            vulkan_intf->wait_sync_index(vulkan_intf->handle);
++            index = vulkan_intf->get_sync_index(vulkan_intf->handle);
++            mask = vulkan_intf->get_sync_index_mask(vulkan_intf->handle);
++        }
++        if (!slot_lease.Acquire(mask, index) || index >= frame_pool.size()) {
++            Fail30HzFrame(emu_window, "changed sync-index mask or invalid slot");
++            return nullptr;
++        }
++        current_frame_index = index;
++        return &frame_pool[index]; // No modulo aliasing between frontend indices.
+     }
+ 
+     // RetroArch may not call context_reset during fullscreen toggle, leaving us
+@@ -668,6 +954,30 @@
+     if (frame->width == width && frame->height == height) {
+         return; // No change needed
+     }
++    if (independent_frames) {
++        if (width == 0 || height == 0 || !slot_lease.CanMutate(current_frame_index) ||
++            frame != &frame_pool[current_frame_index]) {
++            Fail30HzFrame(emu_window, "resize did not own the current slot");
++            return;
++        }
++        Frame replacement = *frame;
++        replacement.image = nullptr;
++        replacement.image_view = nullptr;
++        replacement.framebuffer = nullptr;
++        replacement.allocation = {};
++        try {
++            scheduler.Finish();
++            scheduler.WaitWorker();
++            CreateIndependentFrameImage(replacement, width, height);
++            DestroyIndependentFrameImage(*frame);
++            *frame = replacement; // Same descriptor address; only this released slot changes.
++        } catch (const std::exception&) {
++            DestroyIndependentFrameImage(replacement);
++            Fail30HzFrame(emu_window, "current-slot image recreation failed");
++        }
++        return;
++    }
++
+ 
+     LOG_DEBUG(Render_Vulkan, "Recreating LibRetro frame: {}x{} -> {}x{}", frame->width,
+               frame->height, width, height);
+@@ -695,6 +1005,20 @@
+     if (!vulkan_intf) {
+         LOG_ERROR(Render_Vulkan, "LibRetro Vulkan interface not available for presentation");
+         return;
++    }
++
++    if (independent_frames) {
++        auto& pump = LibRetro::settings.frame_pump;
++        if (pump.IsRunning()) {
++            if (pump.IsLastGuestFrame() && !pump.Failed()) {
++                frame_pump_context.pending_window = this;
++                frame_pump_context.pending_frame = frame;
++            }
++            // Both internal boundaries complete without set_image/video_cb.
++            // Publication happens only after both RunLoops and the final drain.
++            emu_window.SwapBuffers();
++        }
++        return; // Serialization drains must not publish either.
+     }
+ 
+     // CRITICAL: Use persistent struct to avoid stack lifetime issues!
+@@ -714,6 +1038,23 @@
+     // current_frame_index = (current_frame_index + 1) % frame_pool.size();
+ 
+     LOG_TRACE(Render_Vulkan, "Frame presented to LibRetro: {}x{}", frame->width, frame->height);
++}
++
++bool PresentWindow::FrameReadyForDraw(Frame* frame) const {
++    return !independent_frames ||
++           (frame && frame->framebuffer && frame->image && frame->image_view &&
++            !LibRetro::settings.frame_pump.Failed());
++}
++
++bool PresentWindow::PublishFramePumpImage(Frame* frame) {
++    auto& pump = LibRetro::settings.frame_pump;
++    if (!independent_frames || !FrameReadyForDraw(frame) || !pump.ShouldPublish() ||
++        !slot_lease.CanMutate(current_frame_index) || frame != &frame_pool[current_frame_index])
++        return false;
++    vulkan_intf->set_image(vulkan_intf->handle, &frame->image_descriptor, 0, nullptr,
++                           instance.GetGraphicsQueueFamilyIndex());
++    emu_window.SwapBuffers();
++    return pump.HasPublished();
+ }
+ 
+ void PresentWindow::WaitPresent() {
+--- a/src/citra_libretro/libretro_vk.h
++++ b/src/citra_libretro/libretro_vk.h
+@@ -16,12 +16,21 @@
+ #include "video_core/renderer_vulkan/vk_platform.h"
+ 
+ #include "libretro_vulkan.h"
++#include "citra_libretro/runtime_frame_pump.h"
+ 
+ VK_DEFINE_HANDLE(VmaAllocation)
+ 
+ namespace LibRetro {
+ 
+ extern void VulkanResetContext();
++
++// 30Hz output uses one frontend sync acquisition for two complete guest frames.
++bool BeginVulkan30HzRun();
++bool Vulkan30HzContextRefused();
++bool SynchronizeVulkan30HzRun();
++bool PublishVulkan30HzRun();
++bool Vulkan30HzRunFailed();
++void EndVulkan30HzRun();
+ 
+ /// Returns VkApplicationInfo for negotiation interface
+ const VkApplicationInfo* GetVulkanApplicationInfo();
+@@ -94,6 +103,8 @@
+     vk::Semaphore render_ready;
+     vk::Fence present_done;
+     vk::CommandBuffer cmdbuf;
++    vk::ImageViewCreateInfo image_view_info{};
++    retro_vulkan_image image_descriptor{};
+ };
+ 
+ /// LibRetro-specific PresentWindow implementation (same interface as desktop version)
+@@ -114,6 +125,8 @@
+ 
+     /// Queues the provided frame for presentation.
+     void Present(Frame* frame);
++    bool FrameReadyForDraw(Frame* frame) const;
++    bool PublishFramePumpImage(Frame* frame);
+ 
+     /// This is called to notify the rendering backend of a surface change
+     void NotifySurfaceChanged();
+@@ -145,6 +158,8 @@
+ 
+     /// Destroys frame resources
+     void DestroyFrameResources();
++    void CreateIndependentFrameImage(Frame& frame, u32 width, u32 height);
++    void DestroyIndependentFrameImage(Frame& frame);
+ 
+ private:
+     Frontend::EmuWindow& emu_window;
+@@ -163,6 +178,8 @@
+     vk::CommandPool command_pool{};
+     std::vector<Frame> frame_pool;
+     u32 current_frame_index{0};
++    bool independent_frames{false};
++    LibRetro::FrameSlotLease slot_lease;
+ 
+     // Current output dimensions
+     u32 output_width{0};
+--- /dev/null
++++ b/src/citra_libretro/runtime_frame_pump.h
+@@ -0,0 +1,108 @@
++// Copyright 2026 RMS contributors
++// Licensed under GPLv2 or any later version; see LICENSE.txt.
++#pragma once
++#include <cstdint>
++
++namespace LibRetro {
++
++// Output cadence is separate from the guest clock. Selection changes only at load.
++class RuntimeFramePump {
++public:
++    void Request(unsigned fps) noexcept { requested_fps = fps == 30 ? 30 : 60; }
++    void LatchForContent(bool vulkan) noexcept {
++        selected_fps = vulkan && requested_fps == 30 ? 30 : 60;
++        EndRun();
++    }
++    void ResetContent() noexcept { selected_fps = 60; EndRun(); }
++    unsigned OutputFps() const noexcept { return selected_fps; }
++    unsigned GuestFramesPerRun() const noexcept { return IsThirty() ? 2 : 1; }
++    bool IsThirty() const noexcept { return selected_fps == 30; }
++    bool IsRunning() const noexcept { return running; }
++    bool Failed() const noexcept { return failed; }
++    bool BeginRun() noexcept {
++        if (running) return false;
++        EndRun();
++        running = true;
++        return true;
++    }
++    bool ShouldPublish() const noexcept {
++        if (failed) return false;
++        if (!running || !IsThirty()) return true;
++        return !failed && publication_ready && !published;
++    }
++    bool IsLastGuestFrame() const noexcept {
++        return running && !failed && completed + 1 == GuestFramesPerRun();
++    }
++    bool PreparePublication() noexcept {
++        if (!running || failed || completed != GuestFramesPerRun() || published) return false;
++        publication_ready = true;
++        return true;
++    }
++    bool HasPublished() const noexcept { return published; }
++    bool TakeVideoFrame() noexcept {
++        if (!ShouldPublish()) return false;
++        if (running && IsThirty()) published = true;
++        return true;
++    }
++    bool CompleteGuestFrame() noexcept {
++        if (!running || failed || completed >= GuestFramesPerRun()) return false;
++        ++completed;
++        return true;
++    }
++    bool RunSucceeded() const noexcept {
++        return running && !failed && completed == GuestFramesPerRun() &&
++               (!IsThirty() || published);
++    }
++    void FailRun() noexcept { failed = true; }
++    void EndRun() noexcept {
++        running = false;
++        completed = 0;
++        published = false;
++        publication_ready = false;
++        failed = false;
++    }
++
++private:
++    unsigned requested_fps = 60;
++    unsigned selected_fps = 60;
++    unsigned completed = 0;
++    bool running = false;
++    bool published = false;
++    bool publication_ready = false;
++    bool failed = false;
++};
++
++// A frontend lease releases exactly one index; other images/metadata stay owned.
++class FrameSlotLease {
++public:
++    bool Configure(std::uint32_t value) noexcept {
++        mask = value;
++        ResetLease();
++        return mask != 0;
++    }
++    unsigned SlotCount() const noexcept {
++        unsigned count = 0;
++        for (auto bits = mask; bits != 0; bits >>= 1) ++count;
++        return count;
++    }
++    std::uint32_t Mask() const noexcept { return mask; }
++    bool Acquire(std::uint32_t current_mask, unsigned index) noexcept {
++        if (current_mask != mask || index >= 32 || (mask & (std::uint32_t{1} << index)) == 0) {
++            ResetLease();
++            return false;
++        }
++        leased_index = index;
++        acquired = true;
++        return true;
++    }
++    bool CanMutate(unsigned index) const noexcept {
++        return acquired && index == leased_index;
++    }
++    void ResetLease() noexcept { acquired = false; }
++private:
++    std::uint32_t mask = 0;
++    unsigned leased_index = 0;
++    bool acquired = false;
++};
++
++} // namespace LibRetro
 --- /dev/null
 +++ b/src/citra_libretro/runtime_layout_hotkey.h
 @@ -0,0 +1,52 @@
@@ -591,3 +1557,23 @@
      memory = std::make_unique<Memory::MemorySystem>(*this);
  
      timing = std::make_unique<Timing>(num_cores, Settings::values.cpu_clock_percentage.GetValue(),
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -239,11 +239,17 @@
+     if (!Settings::values.use_skip_duplicate_frames.GetValue() ||
+         Core::PerfStats::game_frames_updated) {
+         Frame* frame = window.GetRenderFrame();
++#ifdef HAVE_LIBRETRO
++        if (!window.FrameReadyForDraw(frame)) return;
++#endif
+ 
+         if (layout.width != frame->width || layout.height != frame->height) {
+             window.WaitPresent();
+             scheduler.Finish();
+             window.RecreateFrame(frame, layout.width, layout.height);
++#ifdef HAVE_LIBRETRO
++            if (!window.FrameReadyForDraw(frame)) return;
++#endif
+         }
+ 
+         clear_color.float32[0] = Settings::values.bg_red.GetValue();
